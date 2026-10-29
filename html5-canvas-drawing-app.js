@@ -35,12 +35,10 @@ var drawingApp = (function () {
 		markerBackgroundImage = new Image(),
 		eraserBackgroundImage = new Image(),
 		crayonTextureImage = new Image(),
-		clickX = [],
-		clickY = [],
-		clickColor = [],
-		clickTool = [],
-		clickSize = [],
-		clickDrag = [],
+		drawing = [],        // stroke commands currently shown on the canvas
+		currentStroke = null, // the stroke being drawn right now, or null
+		undoStack = [],      // commands that have been executed, oldest first
+		redoStack = [],      // commands that were undone, most recently undone last
 		paint = false,
 		curColor = colorPurple,
 		curTool = "crayon",
@@ -80,6 +78,8 @@ var drawingApp = (function () {
 				radius,
 				i,
 				selected,
+				stroke,
+				j,
 
 				drawCrayon = function (x, y, color, selected) {
 
@@ -223,11 +223,12 @@ var drawingApp = (function () {
 			context.rect(drawingAreaX, drawingAreaY, drawingAreaWidth, drawingAreaHeight);
 			context.clip();
 
-			// For each point drawn
-			for (i = 0; i < clickX.length; i += 1) {
+			// For each stroke command, replay it using the tool, color and size it was drawn with
+			for (i = 0; i < drawing.length; i += 1) {
+				stroke = drawing[i];
 
 				// Set the drawing radius
-				switch (clickSize[i]) {
+				switch (stroke.size) {
 				case "small":
 					radius = 2;
 					break;
@@ -244,30 +245,32 @@ var drawingApp = (function () {
 					break;
 				}
 
-				// Set the drawing path
-				context.beginPath();
-				// If dragging then draw a line between the two points
-				if (clickDrag[i] && i) {
-					context.moveTo(clickX[i - 1], clickY[i - 1]);
-				} else {
-					// The x position is moved over one pixel so a circle even if not dragging
-					context.moveTo(clickX[i] - 1, clickY[i]);
-				}
-				context.lineTo(clickX[i], clickY[i]);
-				
 				// Set the drawing color
-				if (clickTool[i] === "eraser") {
-					//context.globalCompositeOperation = "destination-out"; // To erase instead of draw over with white
+				if (stroke.tool === "eraser") {
 					context.strokeStyle = 'white';
 				} else {
-					//context.globalCompositeOperation = "source-over";	// To erase instead of draw over with white
-					context.strokeStyle = clickColor[i];
+					context.strokeStyle = stroke.color;
 				}
 				context.lineCap = "round";
 				context.lineJoin = "round";
 				context.lineWidth = radius;
-				context.stroke();
+
+				// For each point in this stroke
+				for (j = 0; j < stroke.points.length; j += 1) {
+					context.beginPath();
+					if (j > 0) {
+						// Connect this point to the previous point in the same stroke
+						context.moveTo(stroke.points[j - 1].x, stroke.points[j - 1].y);
+					} else {
+						// The first point of a stroke has no previous point, so offset by
+						// one pixel to draw a dot
+						context.moveTo(stroke.points[j].x - 1, stroke.points[j].y);
+					}
+					context.lineTo(stroke.points[j].x, stroke.points[j].y);
+					context.stroke();
+				}
 			}
+
 			context.closePath();
 			//context.globalCompositeOperation = "source-over";// To erase instead of draw over with white
 			context.restore();
@@ -283,18 +286,121 @@ var drawingApp = (function () {
 			context.drawImage(outlineImage, drawingAreaX, drawingAreaY, drawingAreaWidth, drawingAreaHeight);
 		},
 
-		// Adds a point to the drawing array.
-		// @param x
-		// @param y
-		// @param dragging
-		addClick = function (x, y, dragging) {
+		// Creates a command for one stroke (press -> drag -> release).
+		// The tool, color and size are captured once, so the stroke replays
+		// the same way even after the user switches to other settings.
+		createStrokeCommand = function (tool, color, size) {
+			return {
+				tool: tool,
+				color: color,
+				size: size,
+				name: tool + " stroke (" + size + ")",
+				points: [],
 
-			clickX.push(x);
-			clickY.push(y);
-			clickTool.push(curTool);
-			clickColor.push(curColor);
-			clickSize.push(curSize);
-			clickDrag.push(dragging);
+				// Executing a stroke adds it to the list of visible strokes
+				execute: function () {
+					drawing.push(this);
+				},
+
+				// Reversing a stroke removes it from the visible strokes.
+				// Commands are undone in reverse order, so it is always the last one.
+				undo: function () {
+					drawing.pop();
+				}
+			};
+		},
+
+		// Creates a command that clears the canvas.
+		// It keeps the strokes it removed so that undo can restore them.
+		createClearCommand = function () {
+			return {
+				name: "Clear",
+				removedStrokes: [],
+
+				// Move every visible stroke into this command, leaving the canvas empty.
+				// splice(0) empties the array and returns what it removed.
+				execute: function () {
+					this.removedStrokes = drawing.splice(0);
+				},
+
+				// Put the removed strokes back in their original order.
+				// Every command after this clear has already been undone, so the drawing is empty here.
+				undo: function () {
+					var i;
+					for (i = 0; i < this.removedStrokes.length; i += 1) {
+						drawing.push(this.removedStrokes[i]);
+					}
+				}
+			};
+		},
+
+		// Rebuilds the command history list and enables only the controls that can be used.
+		updateHistoryUI = function () {
+			var historyList = document.getElementById("historyList"),
+				item,
+				i;
+
+			historyList.innerHTML = "";
+
+			// Active commands, oldest first
+			for (i = 0; i < undoStack.length; i += 1) {
+				item = document.createElement("li");
+				item.textContent = undoStack[i].name;
+				historyList.appendChild(item);
+			}
+
+			// Undone commands, shown greyed out in the order redo would restore them.
+			// The end of redoStack is the next command to redo, so walk it backwards.
+			for (i = redoStack.length - 1; i >= 0; i -= 1) {
+				item = document.createElement("li");
+				item.textContent = redoStack[i].name + " (undone)";
+				item.className = "undone";
+				historyList.appendChild(item);
+			}
+
+			// Disable a control when there is nothing for it to act on
+			document.getElementById("undoButton").disabled = (undoStack.length === 0);
+			document.getElementById("redoButton").disabled = (redoStack.length === 0);
+			document.getElementById("clearButton").disabled = (drawing.length === 0);
+		},
+
+		// Runs a brand-new command and records it in the history.
+		// A new command starts a new editing branch, so the redo history is discarded.
+		runCommand = function (command) {
+			command.execute();
+			undoStack.push(command);
+			redoStack = [];
+			updateHistoryUI();
+			redraw();
+		},
+
+		// Re-executes the most recently undone command and moves it back onto the undo stack
+		redo = function () {
+			if (redoStack.length > 0) {
+				var command = redoStack.pop();
+				command.execute();
+				undoStack.push(command);
+				updateHistoryUI();
+				redraw();
+			}
+		},
+
+		// Reverses the most recent command and keeps it so redo can restore it
+		undo = function () {
+			if (undoStack.length > 0) {
+				var command = undoStack.pop();
+				command.undo();
+				redoStack.push(command);
+				updateHistoryUI();
+				redraw();
+			}
+		},
+
+		// Clears the drawing as an undoable command.
+		clearDrawing = function () {
+			if (drawing.length > 0) {
+				runCommand(createClearCommand());
+			}
 		},
 
 		// Add mouse and touch event listeners to the canvas
@@ -345,8 +451,15 @@ mouseY = (e.changedTouches ? e.changedTouches[0].pageY : e.pageY) - this.offsetT
 						}
 					}
 				}
-				paint = true;
-				addClick(mouseX, mouseY, false);
+				// Only clicks inside the drawing area start a stroke;
+				// clicks on the color, tool and size panels are not commands.
+				if (mouseX > drawingAreaX && mouseX < drawingAreaX + drawingAreaWidth &&
+						mouseY > drawingAreaY && mouseY < drawingAreaY + drawingAreaHeight) {
+					currentStroke = createStrokeCommand(curTool, curColor, curSize);
+					currentStroke.points.push({x: mouseX, y: mouseY});
+					runCommand(currentStroke);
+					paint = true;
+				}
 				redraw();
 			},
 
@@ -356,7 +469,7 @@ mouseY = (e.changedTouches ? e.changedTouches[0].pageY : e.pageY) - this.offsetT
 					mouseY = (e.changedTouches ? e.changedTouches[0].pageY : e.pageY) - this.offsetTop;
 				
 				if (paint) {
-					addClick(mouseX, mouseY, true);
+					currentStroke.points.push({x: mouseX, y: mouseY});
 					redraw();
 				}
 				// Prevent the whole page from dragging if on mobile
@@ -365,11 +478,13 @@ mouseY = (e.changedTouches ? e.changedTouches[0].pageY : e.pageY) - this.offsetT
 
 			release = function () {
 				paint = false;
+				currentStroke = null;
 				redraw();
 			},
 
 			cancel = function () {
 				paint = false;
+				currentStroke = null;
 			};
 
 			// Add mouse event listeners to canvas element
@@ -383,6 +498,27 @@ mouseY = (e.changedTouches ? e.changedTouches[0].pageY : e.pageY) - this.offsetT
 			canvas.addEventListener("touchmove", drag, false);
 			canvas.addEventListener("touchend", release, false);
 			canvas.addEventListener("touchcancel", cancel, false);
+
+			// Undo, redo and clear controls
+			document.getElementById("undoButton").addEventListener("click", undo, false);
+			document.getElementById("redoButton").addEventListener("click", redo, false);
+			document.getElementById("clearButton").addEventListener("click", clearDrawing, false);
+
+			// Keyboard shortcuts: Ctrl+Z = undo, Ctrl+Y or Ctrl+Shift+Z = redo (Cmd on a Mac)
+			document.addEventListener("keydown", function (e) {
+				var key = e.key.toLowerCase();
+
+				if (!(e.ctrlKey || e.metaKey)) {
+					return;
+				}
+				if (key === "z" && !e.shiftKey) {
+					undo();
+					e.preventDefault();
+				} else if (key === "y" || (key === "z" && e.shiftKey)) {
+					redo();
+					e.preventDefault();
+				}
+			}, false);
 		},
 
 		// Calls the redraw function after all neccessary resources are loaded.

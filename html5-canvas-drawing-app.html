@@ -2,9 +2,20 @@
 <html>
   <head>
     <title>Create HTML5 Canvas JavaScript Drawing App Example</title>
+    <style>
+      #historyList .undone { color: #999; text-decoration: line-through; }
+    </style>
   </head>
   <body>
     <div id="canvasDiv"></div>
+    <div id="controls">
+      <button id="undoButton" type="button" disabled>Undo</button>
+      <button id="redoButton" type="button" disabled>Redo</button>
+      <button id="clearButton" type="button" disabled>Clear</button>
+    </div>
+
+    <h3>Command history</h3>
+    <ol id="historyList"></ol>
     <!--[if IE]><script type="text/javascript" src="excanvas.js"></script><![endif]-->
     <script type="text/javascript" src="html5-canvas-drawing-app.js"></script>
     <script type="text/javascript">
